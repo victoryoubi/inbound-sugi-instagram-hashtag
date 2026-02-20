@@ -1,0 +1,44 @@
+name: Deploy Cloud Run Job
+
+on:
+  push:
+    branches: ["main"]
+
+env:
+  PROJECT_ID: inbound-sugi-app
+  REGION: asia-northeast1
+  AR_REPO: insta
+  IMAGE_NAME: instagram-hashtag
+  JOB_NAME: instagram-hashtag
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Set project
+        run: gcloud config set project $PROJECT_ID
+
+      - name: Build & Push image (Cloud Build)
+        run: |
+          gcloud builds submit \
+            --tag $REGION-docker.pkg.dev/$PROJECT_ID/$AR_REPO/$IMAGE_NAME:latest
+
+      - name: Update Cloud Run Job image
+        run: |
+          gcloud run jobs update $JOB_NAME \
+            --image $REGION-docker.pkg.dev/$PROJECT_ID/$AR_REPO/$IMAGE_NAME:latest \
+            --region $REGION
