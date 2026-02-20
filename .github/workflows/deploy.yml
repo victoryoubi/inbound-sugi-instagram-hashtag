@@ -9,7 +9,8 @@ env:
   REGION: asia-northeast1
   AR_REPO: insta
   IMAGE_NAME: instagram-hashtag
-  JOB_NAME: instagram-hashtag
+  # 更新したいJob名をスペース区切りで列挙
+  JOBS: "instagram-hashtag instagram-refresh"
 
 jobs:
   deploy:
@@ -34,17 +35,20 @@ jobs:
 
       - name: Configure docker auth
         run: gcloud auth configure-docker $REGION-docker.pkg.dev -q
-      
+
       - name: Build image
         run: |
           docker build -t $REGION-docker.pkg.dev/$PROJECT_ID/$AR_REPO/$IMAGE_NAME:latest .
-      
+
       - name: Push image
         run: |
           docker push $REGION-docker.pkg.dev/$PROJECT_ID/$AR_REPO/$IMAGE_NAME:latest
 
-      - name: Update Cloud Run Job image
+      - name: Update Cloud Run Jobs image
         run: |
-          gcloud run jobs update $JOB_NAME \
-            --image $REGION-docker.pkg.dev/$PROJECT_ID/$AR_REPO/$IMAGE_NAME:latest \
-            --region $REGION
+          for JOB in $JOBS; do
+            echo "Updating job: $JOB"
+            gcloud run jobs update "$JOB" \
+              --image $REGION-docker.pkg.dev/$PROJECT_ID/$AR_REPO/$IMAGE_NAME:latest \
+              --region $REGION
+          done
