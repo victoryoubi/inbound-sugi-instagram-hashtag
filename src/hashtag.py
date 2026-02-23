@@ -5,7 +5,7 @@ def fetch_recent_media(hashtag_id: str, ig_user_id: str, access_token: str, api_
     url = f"https://graph.facebook.com/{api_version}/{hashtag_id}/recent_media"
     params = {
         "user_id": ig_user_id,
-        "fields": "id,caption,children,timestamp,media_type,media_url,permalink,comments_count,like_count",",
+        "fields": "id,caption,children,timestamp,media_type,media_url,permalink,comments_count,like_count",
         "limit": limit,
         "access_token": access_token,
     }
