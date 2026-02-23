@@ -7,6 +7,8 @@ if __name__ == "__main__":
 
     if mode == "refresh":
         run_refresh()
+    elif mode == "hashtag":
+        run_hashtag()
     elif mode == "collect":
         run_collect()
     else:
