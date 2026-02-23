@@ -7,7 +7,7 @@ def fetch_recent_media(hashtag_id: str, ig_user_id: str, access_token: str, api_
         "user_id": ig_user_id,
         "fields": "id,caption,timestamp,media_type,media_url,permalink,username",
         "limit": limit,
-        "access_token": token,
+        "access_token": access_token,
     }
     r = requests.get(url, params=params, timeout=30)
     r.raise_for_status()
@@ -17,9 +17,9 @@ def run_hashtag():
     api_version = os.getenv("FB_API_VERSION", "v24.0")
     ig_user_id = os.environ["IG_USER_ID"]
     hashtag_id = os.environ["HASHTAG_ID"]
-    token = os.environ["LONG_TOKEN"]
+    access_token = os.environ["LONG_TOKEN"]
 
-    res = fetch_recent_media(hashtag_id, ig_user_id, token, api_version, limit=50)
+    res = fetch_recent_media(hashtag_id, ig_user_id, access_token, api_version, limit=50)
     data = res.get("data", [])
 
     print(f"✅ recent_media fetched. count={len(data)}")
