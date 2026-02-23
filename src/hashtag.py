@@ -7,7 +7,7 @@ def fetch_recent_media(hashtag_id: str, ig_user_id: str, access_token: str, api_
         "user_id": ig_user_id,
         "fields": "id,caption,timestamp,media_type,media_url,permalink,username",
         "limit": limit,
-        "access_token": access_token,
+        "access_token": token,
     }
     r = requests.get(url, params=params, timeout=30)
     r.raise_for_status()
