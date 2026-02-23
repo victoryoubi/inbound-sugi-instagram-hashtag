@@ -79,11 +79,19 @@ def run_hashtag():
     rows = fetch_all_recent_media(hashtag_id, ig_user_id, access_token, api_version)
     print(f"Fetched {len(rows)} rows")
 
+    now_iso = datetime.utcnow().isoformat()
+
+    enriched_rows = []
+    for row in rows:
+        row["fetched_at"] = now_iso
+        row["hashtag_id"] = hashtag_id
+        enriched_rows.append(row)
+
     now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     blob_name = f"instagram/hashtag/{hashtag_id}/{now}.ndjson"
 
     print("Uploading to GCS...")
-    upload_to_gcs(bucket, blob_name, rows)
+    upload_to_gcs(bucket, blob_name, enriched_rows)
 
     gcs_uri = f"gs://{bucket}/{blob_name}"
 
