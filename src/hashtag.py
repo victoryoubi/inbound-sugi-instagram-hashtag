@@ -8,10 +8,14 @@ from google.cloud import bigquery
 
 def fetch_all_recent_media(hashtag_id, ig_user_id, access_token, api_version):
     url = f"https://graph.facebook.com/{api_version}/{hashtag_id}/recent_media"
+
+    per_page = int(os.getenv("LIMIT", "25"))          
+    max_items = int(os.getenv("MAX_ITEMS", "200"))    
+
     params = {
         "user_id": ig_user_id,
         "fields": "id,caption,timestamp,media_type,media_url,permalink,comments_count,like_count",
-        "limit": 50,
+        "limit": per_page,
         "access_token": access_token,
     }
 
@@ -26,13 +30,17 @@ def fetch_all_recent_media(hashtag_id, ig_user_id, access_token, api_version):
         data = res.get("data", [])
         all_rows.extend(data)
 
+        # ✅ 上限に達したら打ち切り
+        if len(all_rows) >= max_items:
+            all_rows = all_rows[:max_items]
+            break
+
         next_url = res.get("paging", {}).get("next")
         if not next_url:
             break
 
-        # next には access_token など含まれている
         url = next_url
-        params = None
+        params = None  # nextはURLにtoken等含む
 
     return all_rows
 
