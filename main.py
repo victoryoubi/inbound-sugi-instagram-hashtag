@@ -1,5 +1,6 @@
 import os
 from src.refresh import run_refresh
+from src.hashtag import run_hashtag
 from src.collect import run_collect
 
 if __name__ == "__main__":
