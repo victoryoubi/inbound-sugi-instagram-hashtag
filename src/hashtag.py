@@ -1,5 +1,8 @@
 import os
+import time
 import requests
+
+RETRY_STATUS = {500, 502, 503, 504}
 
 def fetch_recent_media(hashtag_id: str, ig_user_id: str, access_token: str, api_version: str, limit: int = 50) -> dict:
     url = f"https://graph.facebook.com/{api_version}/{hashtag_id}/recent_media"
@@ -9,9 +12,30 @@ def fetch_recent_media(hashtag_id: str, ig_user_id: str, access_token: str, api_
         "limit": limit,
         "access_token": access_token,
     }
-    r = requests.get(url, params=params, timeout=30)
-    r.raise_for_status()
-    return r.json()
+
+    for attempt in range(1, 6):  # 最大5回
+        r = requests.get(url, params=params, timeout=30)
+
+        if r.status_code == 200:
+            return r.json()
+
+        # ここ重要：トークンはマスクしてログに出す
+        safe_params = dict(params)
+        safe_params["access_token"] = "***"
+
+        print(f"[recent_media] failed status={r.status_code} attempt={attempt}")
+        print(f"url={url} params={safe_params}")
+        print(f"body={r.text}")
+
+        # 5xxだけリトライ
+        if r.status_code in RETRY_STATUS:
+            time.sleep(min(10, 2 ** (attempt - 1)))  # 1,2,4,8,10秒
+            continue
+
+        # 4xxなどは即エラー（権限/ID/制限）
+        raise RuntimeError(f"recent_media error {r.status_code}: {r.text}")
+
+    raise RuntimeError("recent_media failed after retries (5xx)")
 
 def run_hashtag():
     api_version = os.getenv("FB_API_VERSION", "v24.0")
