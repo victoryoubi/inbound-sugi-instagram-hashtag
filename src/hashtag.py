@@ -1,41 +1,69 @@
 import os
-import time
+import json
 import requests
+from datetime import datetime
+from google.cloud import storage
+from google.cloud import bigquery
 
-RETRY_STATUS = {500, 502, 503, 504}
 
-def fetch_recent_media(hashtag_id: str, ig_user_id: str, access_token: str, api_version: str, limit: int = 50) -> dict:
+def fetch_all_recent_media(hashtag_id, ig_user_id, access_token, api_version):
     url = f"https://graph.facebook.com/{api_version}/{hashtag_id}/recent_media"
     params = {
         "user_id": ig_user_id,
         "fields": "id,caption,timestamp,media_type,media_url,permalink,comments_count,like_count",
-        "limit": limit,
+        "limit": 50,
         "access_token": access_token,
     }
 
-    for attempt in range(1, 6):  # 最大5回
+    all_rows = []
+
+    while True:
         r = requests.get(url, params=params, timeout=30)
+        if r.status_code != 200:
+            raise RuntimeError(f"Error {r.status_code}: {r.text}")
 
-        if r.status_code == 200:
-            return r.json()
+        res = r.json()
+        data = res.get("data", [])
+        all_rows.extend(data)
 
-        # ここ重要：トークンはマスクしてログに出す
-        safe_params = dict(params)
-        safe_params["access_token"] = "***"
+        next_url = res.get("paging", {}).get("next")
+        if not next_url:
+            break
 
-        print(f"[recent_media] failed status={r.status_code} attempt={attempt}")
-        print(f"url={url} params={safe_params}")
-        print(f"body={r.text}")
+        # next には access_token など含まれている
+        url = next_url
+        params = None
 
-        # 5xxだけリトライ
-        if r.status_code in RETRY_STATUS:
-            time.sleep(min(10, 2 ** (attempt - 1)))  # 1,2,4,8,10秒
-            continue
+    return all_rows
 
-        # 4xxなどは即エラー（権限/ID/制限）
-        raise RuntimeError(f"recent_media error {r.status_code}: {r.text}")
 
-    raise RuntimeError("recent_media failed after retries (5xx)")
+def upload_to_gcs(bucket_name, blob_name, rows):
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
+
+    ndjson = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
+    blob.upload_from_string(ndjson, content_type="application/json")
+
+
+def load_to_bigquery(dataset_id, table_id, gcs_uri):
+    client = bigquery.Client()
+    table_ref = f"{client.project}.{dataset_id}.{table_id}"
+
+    job_config = bigquery.LoadJobConfig(
+        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+        autodetect=True,
+        write_disposition="WRITE_APPEND",
+    )
+
+    load_job = client.load_table_from_uri(
+        gcs_uri,
+        table_ref,
+        job_config=job_config,
+    )
+
+    load_job.result()
+
 
 def run_hashtag():
     api_version = os.getenv("FB_API_VERSION", "v24.0")
@@ -43,20 +71,23 @@ def run_hashtag():
     hashtag_id = os.environ["HASHTAG_ID"]
     access_token = os.environ["LONG_TOKEN"]
 
-    res = fetch_recent_media(hashtag_id, ig_user_id, access_token, api_version, limit=50)
-    data = res.get("data", [])
+    bucket = os.environ["GCS_BUCKET"]
+    dataset = os.environ["BQ_DATASET"]
+    table = os.environ["BQ_TABLE"]
 
-    print(f"✅ recent_media fetched. count={len(data)}")
-    # 先頭3件だけログに出す（captionは長いので一部だけ）
-    for i, row in enumerate(data[:3]):
-        cap = (row.get("caption") or "").replace("\n", " ")
-        if len(cap) > 120:
-            cap = cap[:120] + "..."
-        print(f"[{i}] id={row.get('id')} type={row.get('media_type')} time={row.get('timestamp')} user={row.get('username')}")
-        print(f"     permalink={row.get('permalink')}")
-        print(f"     caption={cap}")
+    print("Fetching recent_media...")
+    rows = fetch_all_recent_media(hashtag_id, ig_user_id, access_token, api_version)
+    print(f"Fetched {len(rows)} rows")
 
-    # ページング確認（次があるか）
-    paging = res.get("paging", {})
-    next_url = paging.get("next")
-    print("paging.next:", next_url if next_url else "(none)")
+    now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    blob_name = f"instagram/hashtag/{hashtag_id}/{now}.ndjson"
+
+    print("Uploading to GCS...")
+    upload_to_gcs(bucket, blob_name, rows)
+
+    gcs_uri = f"gs://{bucket}/{blob_name}"
+
+    print("Loading to BigQuery...")
+    load_to_bigquery(dataset, table, gcs_uri)
+
+    print("✅ Done")
