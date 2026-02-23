@@ -12,4 +12,4 @@ if __name__ == "__main__":
     elif mode == "collect":
         run_collect()
     else:
-        raise ValueError("MODE must be set to 'refresh' or 'collect'")
+        raise ValueError("MODE must be set to 'refresh' or 'hashtag' or 'collect'")
