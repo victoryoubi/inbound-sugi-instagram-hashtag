@@ -15,9 +15,9 @@ def _backoff_sleep(attempt: int, base: float = 1.0, cap: float = 60.0):
     sec = min(cap, base * (2 ** attempt)) + random.random()
     time.sleep(sec)
 
-def _get_json_with_retry(url, params=None, timeout=(10, 120), max_attempts=6):
+def _get_json_with_retry(url, params=None, timeout=(10, 120), max_attempts=8):
     """
-    Graph API GET with retries for 429/5xx and 'reduce amount' error.
+    Graph API GET with retries for 429/5xx and transient 'reduce amount' / app limit errors.
     """
     last_err = None
     for attempt in range(max_attempts):
@@ -32,10 +32,31 @@ def _get_json_with_retry(url, params=None, timeout=(10, 120), max_attempts=6):
             return r.json()
 
         txt = r.text or ""
-        # Rate limit / transient errors / reduce message
-        if r.status_code in (429, 500, 502, 503, 504) or REDUCE_MSG in txt:
-            last_err = RuntimeError(f"Error {r.status_code}: {txt}")
-            _backoff_sleep(attempt)
+        err_code = None
+        is_transient = False
+
+        # 可能ならJSONでエラー詳細を読む（Graphはだいたいこの形）
+        try:
+            j = r.json()
+            err = (j or {}).get("error") or {}
+            err_code = err.get("code")
+            is_transient = bool(err.get("is_transient"))
+            msg = err.get("message") or txt
+        except Exception:
+            msg = txt
+
+        # ✅ リトライしたいケース
+        # - 429: rate limit
+        # - 5xx: transient
+        # - reduce message
+        # - 403 code=4 (Application request limit reached) かつ transient
+        if (
+            r.status_code in (429, 500, 502, 503, 504)
+            or REDUCE_MSG in txt
+            or (r.status_code == 403 and err_code == 4 and is_transient)
+        ):
+            last_err = RuntimeError(f"Error {r.status_code} (code={err_code}, transient={is_transient}): {msg}")
+            _backoff_sleep(attempt, base=2.0, cap=120.0)  # ★少し強めに待つ
             continue
 
         # Hard failure
@@ -73,6 +94,19 @@ def _fetch_recent_media_light(hashtag_id, ig_user_id, access_token, api_version,
         url = next_url
         params = None
 
+def _fetch_media_detail_batch(media_ids, access_token, api_version):
+    """
+    Stage 2 (batch): fetch full fields for multiple media_ids in one request using ?ids=
+    戻り値は { "<id>": {...}, "<id>": {...} } のdict
+    """
+    url = f"https://graph.facebook.com/{api_version}/"
+    params = {
+        "ids": ",".join(media_ids),
+        "fields": "id,caption,timestamp,media_type,media_url,permalink,comments_count,like_count",
+        "access_token": access_token,
+    }
+    return _get_json_with_retry(url, params=params, timeout=(10, 120), max_attempts=8)
+
 def _fetch_media_detail(media_id, access_token, api_version):
     """
     Stage 2: fetch full fields per media_id
@@ -86,15 +120,20 @@ def _fetch_media_detail(media_id, access_token, api_version):
 
 def fetch_all_recent_media(hashtag_id, ig_user_id, access_token, api_version):
     """
-    2段階取得の本体。シグネチャは元のまま。
+    2段階取得（バッチ版）
+    Stage1: recent_mediaは軽く（id等のみ）
+    Stage2: ids= でまとめて詳細取得（API回数激減）
     env:
-      LIMIT: recent_media の 1ページ件数（推奨 10〜25）
-      MAX_ITEMS: 1ハッシュタグの最大取得件数（要望どおり 500 のままでOK）
-      DETAIL_SLEEP_SEC: 詳細取得の間隔（推奨 0.2〜0.5）
+      LIMIT: recent_media の1ページ件数（推奨 10〜25）
+      MAX_ITEMS: 1ハッシュタグ最大取得件数（要望通り 500）
+      DETAIL_BATCH_SIZE: 詳細をまとめる件数（推奨 25〜50）
+      DETAIL_BATCH_SLEEP_SEC: バッチ間の待ち（推奨 0〜0.5）
     """
     per_page = int(os.getenv("LIMIT", "10"))
     max_items = int(os.getenv("MAX_ITEMS", "500"))
-    detail_sleep = float(os.getenv("DETAIL_SLEEP_SEC", "0.25"))
+
+    batch_size = int(os.getenv("DETAIL_BATCH_SIZE", "50"))  # ★ここが肝
+    batch_sleep = float(os.getenv("DETAIL_BATCH_SLEEP_SEC", "0.0"))
 
     # Stage 1: light list
     base_rows = _fetch_recent_media_light(
@@ -106,24 +145,54 @@ def fetch_all_recent_media(hashtag_id, ig_user_id, access_token, api_version):
         max_items=max_items,
     )
 
-    # Stage 2: per-id detail
     detailed = []
-    for i, b in enumerate(base_rows, start=1):
-        media_id = b["id"]
+
+    # Stage 2: batch detail
+    for i in range(0, len(base_rows), batch_size):
+        batch = base_rows[i:i + batch_size]
+        ids = [x["id"] for x in batch]
+
         try:
-            d = _fetch_media_detail(media_id, access_token, api_version)
-            detailed.append(d)
+            res = _fetch_media_detail_batch(ids, access_token, api_version)
         except Exception as e:
-            # ここは運用方針次第：落とさず続行（推奨）
-            print(f"warn: detail fetch failed media_id={media_id}: {e}")
-            # 最低限の情報は残す（後で再取得も可能）
-            detailed.append(b)
+            # バッチが丸ごと落ちたら、最低限を突っ込んで続行（運用優先）
+            print(f"warn: batch detail fetch failed ids[{i}:{i+batch_size}]: {e}")
+            for b in batch:
+                detailed.append({
+                    "id": b.get("id"),
+                    "caption": None,
+                    "timestamp": b.get("timestamp"),
+                    "media_type": b.get("media_type"),
+                    "media_url": None,
+                    "permalink": b.get("permalink"),
+                    "comments_count": None,
+                    "like_count": None,
+                })
+            continue
 
-        if detail_sleep > 0:
-            time.sleep(detail_sleep)
+        # res は {id: {...}} 形式
+        for b in batch:
+            mid = b["id"]
+            if isinstance(res, dict) and mid in res and isinstance(res[mid], dict):
+                detailed.append(res[mid])
+            else:
+                # 返ってこなかったIDは最低限で埋める（NULL）
+                detailed.append({
+                    "id": b.get("id"),
+                    "caption": None,
+                    "timestamp": b.get("timestamp"),
+                    "media_type": b.get("media_type"),
+                    "media_url": None,
+                    "permalink": b.get("permalink"),
+                    "comments_count": None,
+                    "like_count": None,
+                })
 
-        if i % 50 == 0:
-            print(f"detail fetched: {i}/{len(base_rows)}")
+        if batch_sleep > 0:
+            time.sleep(batch_sleep)
+
+        if (i // batch_size + 1) % 5 == 0:
+            print(f"detail batch done: {min(i+batch_size, len(base_rows))}/{len(base_rows)}")
 
     return detailed
 
