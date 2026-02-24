@@ -15,7 +15,7 @@ def _backoff_sleep(attempt: int, base: float = 1.0, cap: float = 60.0):
     sec = min(cap, base * (2 ** attempt)) + random.random()
     time.sleep(sec)
 
-def _get_json_with_retry(url, params=None, timeout=(10, 120), max_attempts=8):
+def _get_json_with_retry(url, params=None, timeout=(10, 120), max_attempts=6):
     """
     Graph API GET with retries for 429/5xx and transient 'reduce amount' / app limit errors.
     """
@@ -107,17 +107,6 @@ def _fetch_media_detail_batch(media_ids, access_token, api_version):
     }
     return _get_json_with_retry(url, params=params, timeout=(10, 120), max_attempts=8)
 
-def _fetch_media_detail(media_id, access_token, api_version):
-    """
-    Stage 2: fetch full fields per media_id
-    """
-    url = f"https://graph.facebook.com/{api_version}/{media_id}"
-    params = {
-        "fields": "id,caption,timestamp,media_type,media_url,permalink,comments_count,like_count",
-        "access_token": access_token,
-    }
-    return _get_json_with_retry(url, params=params, timeout=(10, 120), max_attempts=6)
-
 def fetch_all_recent_media(hashtag_id, ig_user_id, access_token, api_version):
     """
     2段階取得（バッチ版）
@@ -202,7 +191,7 @@ def upload_to_gcs(bucket_name, blob_name, rows):
     bucket = client.bucket(bucket_name)
     blob = bucket.blob(blob_name)
 
-    ndjson = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
+    ndjson = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n"
     blob.upload_from_string(ndjson, content_type="application/json")
 
 
