@@ -76,34 +76,39 @@ def load_to_bigquery(dataset_id, table_id, gcs_uri):
 def run_hashtag():
     api_version = os.getenv("FB_API_VERSION", "v24.0")
     ig_user_id = os.environ["IG_USER_ID"]
-    hashtag_id = os.environ["HASHTAG_ID"]
     access_token = os.environ["LONG_TOKEN"]
 
     bucket = os.environ["GCS_BUCKET"]
     dataset = os.environ["BQ_DATASET"]
     table = os.environ["BQ_TABLE"]
 
-    print("Fetching recent_media...")
-    rows = fetch_all_recent_media(hashtag_id, ig_user_id, access_token, api_version)
-    print(f"Fetched {len(rows)} rows")
+    hashtag_ids = os.environ["HASHTAG_IDS"].split(",")
 
-    now_iso = datetime.utcnow().isoformat()
+    for hashtag_id in hashtag_ids:
+        hashtag_id = hashtag_id.strip()
+        print(f"===== Processing {hashtag_id} =====")
 
-    enriched_rows = []
-    for row in rows:
-        row["fetched_at"] = now_iso
-        row["hashtag_id"] = hashtag_id
-        enriched_rows.append(row)
+        rows = fetch_all_recent_media(
+            hashtag_id, ig_user_id, access_token, api_version
+        )
 
-    now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    blob_name = f"instagram/hashtag/{hashtag_id}/{now}.ndjson"
+        print(f"Fetched {len(rows)} rows")
 
-    print("Uploading to GCS...")
-    upload_to_gcs(bucket, blob_name, enriched_rows)
+        now_iso = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
-    gcs_uri = f"gs://{bucket}/{blob_name}"
+        enriched_rows = []
+        for row in rows:
+            row["fetched_at"] = now_iso
+            row["hashtag_id"] = hashtag_id
+            enriched_rows.append(row)
 
-    print("Loading to BigQuery...")
-    load_to_bigquery(dataset, table, gcs_uri)
+        now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        blob_name = f"instagram/hashtag/{hashtag_id}/{now}.ndjson"
 
-    print("✅ Done")
+        upload_to_gcs(bucket, blob_name, enriched_rows)
+
+        gcs_uri = f"gs://{bucket}/{blob_name}"
+
+        load_to_bigquery(dataset, table, gcs_uri)
+
+    print("✅ All hashtags done")
