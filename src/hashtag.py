@@ -22,7 +22,7 @@ def fetch_all_recent_media(hashtag_id, ig_user_id, access_token, api_version):
     all_rows = []
 
     while True:
-        r = requests.get(url, params=params, timeout=30)
+        r = requests.get(url, params=params, timeout=60)
         if r.status_code != 200:
             raise RuntimeError(f"Error {r.status_code}: {r.text}")
 
