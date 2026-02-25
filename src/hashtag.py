@@ -128,16 +128,18 @@ def _fetch_media_detail_batch(media_ids, access_token, api_version):
     return _get_json_with_retry(url, params=params, timeout=(10, 120), max_attempts=8)
 
 
+
 def fetch_all_recent_media_with_snapshots(hashtag_id, ig_user_id, access_token, api_version):
     """
-    2段階取得（バッチ版）+ snapshot用 raw response を返す
+    2段階取得（バッチ版）+ snapshot用 raw response を返す（BQ schema 互換）
+
     Returns:
       detailed_rows: list[dict]   (mediaテーブル用の詳細行)
-      stage1_params: dict
-      stage2_params: dict
-      stage1_response: dict      (ページごとの生レスポンスを含む)
-      stage2_response: dict      (ids= の生レスポンスを全件マージした dict)
-      stage2_response_meta: dict (失敗バッチなど補助情報)
+      stage1_params: dict         (JSON列に入れる想定)
+      stage2_params: dict         (JSON列に入れる想定)
+      stage1_response: dict       (JSON列: pages を含む)
+      stage2_response: dict       (JSON列: batches を含む)
+      stage2_response_meta: dict  (補助情報)
     """
     per_page = int(os.getenv("LIMIT", "10"))
     max_items = int(os.getenv("MAX_ITEMS", "500"))
@@ -146,7 +148,7 @@ def fetch_all_recent_media_with_snapshots(hashtag_id, ig_user_id, access_token, 
 
     stage1_params = {
         "endpoint": f"/{hashtag_id}/recent_media",
-        "user_id": ig_user_id,
+        "user_id": str(ig_user_id),
         "fields": "id,timestamp,media_type,permalink",
         "limit": per_page,
         "max_items": max_items,
@@ -161,7 +163,9 @@ def fetch_all_recent_media_with_snapshots(hashtag_id, ig_user_id, access_token, 
         # access_token は保存しない
     }
 
-    # Stage 1
+    # -----------------------------
+    # Stage 1: recent_media（軽量） + ページごとの生レスポンス
+    # -----------------------------
     base_rows, stage1_response = _fetch_recent_media_light(
         hashtag_id=hashtag_id,
         ig_user_id=ig_user_id,
@@ -171,28 +175,52 @@ def fetch_all_recent_media_with_snapshots(hashtag_id, ig_user_id, access_token, 
         max_items=max_items,
     )
 
+    # -----------------------------
+    # Stage 2: detail をバッチで取得
+    #   - media 用: stage2_response_merged（id -> detail）
+    #   - snapshot 用: stage2_batches（バッチごとの生レスポンス/エラー）
+    # -----------------------------
     detailed_rows = []
     stage2_response_merged = {}  # { "<id>": {...}, ... }
+    stage2_batches = []          # [{"batch_index":..,"range":..,"ids":[..],"ok":..,"error":..,"response":..}, ...]
+
     stage2_meta = {
         "total_base_rows": len(base_rows),
+        "detail_batch_size": batch_size,
         "failed_batches": [],  # [{"range":[i,j], "ids":[...], "error":"..."}]
     }
 
     for i in range(0, len(base_rows), batch_size):
         batch = base_rows[i:i + batch_size]
-        ids = [x["id"] for x in batch]
+        ids = [x.get("id") for x in batch if x.get("id")]
+
+        batch_rec = {
+            "batch_index": i // batch_size,
+            "range": [i, i + len(batch)],
+            "ids": ids,
+            "ok": False,
+            "error": None,
+            "response": None,  # 成功時は Graph API の生レスポンス dict
+        }
 
         try:
             res = _fetch_media_detail_batch(ids, access_token, api_version)
+            batch_rec["ok"] = True
+            batch_rec["response"] = res
+
             if isinstance(res, dict):
                 stage2_response_merged.update(res)
+
         except Exception as e:
+            batch_rec["ok"] = False
+            batch_rec["error"] = str(e)
             stage2_meta["failed_batches"].append({
                 "range": [i, i + len(batch)],
                 "ids": ids,
                 "error": str(e),
             })
-           
+
+            # 失敗バッチは base の情報で埋める（後段の media テーブル用）
             for b in batch:
                 detailed_rows.append({
                     "id": b.get("id"),
@@ -204,12 +232,18 @@ def fetch_all_recent_media_with_snapshots(hashtag_id, ig_user_id, access_token, 
                     "comments_count": None,
                     "like_count": None,
                 })
+
+            stage2_batches.append(batch_rec)
+
+            if batch_sleep > 0:
+                time.sleep(batch_sleep)
+
             continue
 
-    
+        # 成功バッチ：merged から個別行を作る（落ちてるIDは base で埋める）
         for b in batch:
-            mid = b["id"]
-            if mid in stage2_response_merged and isinstance(stage2_response_merged[mid], dict):
+            mid = b.get("id")
+            if mid and mid in stage2_response_merged and isinstance(stage2_response_merged[mid], dict):
                 detailed_rows.append(stage2_response_merged[mid])
             else:
                 detailed_rows.append({
@@ -223,24 +257,32 @@ def fetch_all_recent_media_with_snapshots(hashtag_id, ig_user_id, access_token, 
                     "like_count": None,
                 })
 
+        stage2_batches.append(batch_rec)
+
         if batch_sleep > 0:
             time.sleep(batch_sleep)
 
         if (i // batch_size + 1) % 5 == 0:
-            print(f"detail batch done: {min(i+batch_size, len(base_rows))}/{len(base_rows)}")
+            print(f"detail batch done: {min(i + batch_size, len(base_rows))}/{len(base_rows)}")
 
-    # stage2_response は “全部丸ごと”
-    stage2_response = stage2_response_merged
+
+    stage2_response = {
+        "summary": {
+            "total_base_rows": len(base_rows),
+            "returned_detail_ids": len(stage2_response_merged),
+            "failed_batch_count": len(stage2_meta["failed_batches"]),
+        },
+        "batches": stage2_batches,  
+    }
 
     return (
         detailed_rows,
         stage1_params,
         stage2_params,
-        stage1_response,
-        stage2_response,
+        stage1_response,   
+        stage2_response,   
         stage2_meta,
     )
-
 
 def upload_to_gcs(bucket_name, blob_name, rows):
     client = storage.Client()
@@ -375,25 +417,60 @@ def run_hashtag():
         load_to_bigquery(dataset, media_table, media_gcs_uri)
 
         # -----------------------------
-        # snapshotsテーブル用（JSON型カラムに合わせる）
+        # snapshotsテーブル用（異なるデータごとに1行）
         # -----------------------------
-        snapshot_row = {
-            "run_id": run_id,
-            "hashtag_id": str(hashtag_id),
-            "collected_at": collected_at_iso,
-        
-            "ig_user_id": str(ig_user_id),
-            "api_version": str(api_version),
-        
-            # JSON型カラム：dict/listをそのまま入れる（文字列化しない）
-            "stage1_params": stage1_params,
-            "stage2_params": stage2_params,
-            "stage1_response": stage1_response,
-            "stage2_response": stage2_response,
-        }
-        
+        snapshot_rows = []
+
+        # stage1: ページごとに1行
+        pages = (stage1_response or {}).get("pages", [])
+        for page_idx, page_res in enumerate(pages):
+            snapshot_rows.append({
+                "run_id": run_id,
+                "hashtag_id": str(hashtag_id),
+                "collected_at": collected_at_iso,
+                "ig_user_id": str(ig_user_id),
+                "api_version": str(api_version),
+
+                "stage": "stage1",
+                "seq": int(page_idx),
+
+                "stage1_params": stage1_params,
+                "stage2_params": None,
+
+                "response": page_res,
+                "meta": {
+                    "page_count": stage1_response.get("page_count"),
+                    "returned_count": stage1_response.get("returned_count"),
+                },
+            })
+
+        # stage2: バッチごとに1行
+        batches = (stage2_response or {}).get("batches", [])
+        for b in batches:
+            snapshot_rows.append({
+                "run_id": run_id,
+                "hashtag_id": str(hashtag_id),
+                "collected_at": collected_at_iso,
+                "ig_user_id": str(ig_user_id),
+                "api_version": str(api_version),
+
+                "stage": "stage2",
+                "seq": int(b.get("batch_index", 0)),
+
+                "stage1_params": None,
+                "stage2_params": stage2_params,
+
+                "response": b.get("response"),
+                "meta": {
+                    "ok": b.get("ok"),
+                    "error": b.get("error"),
+                    "range": b.get("range"),
+                    "ids": b.get("ids"),
+                },
+            })
+
         snapshot_blob_name = f"instagram/hashtag_snapshots/{hashtag_id}/{run_id}.ndjson"
-        upload_to_gcs(bucket, snapshot_blob_name, [snapshot_row])
+        upload_to_gcs(bucket, snapshot_blob_name, snapshot_rows)
         snapshot_gcs_uri = f"gs://{bucket}/{snapshot_blob_name}"
         load_to_bigquery(dataset, snapshot_table, snapshot_gcs_uri)
 
