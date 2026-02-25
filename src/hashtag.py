@@ -375,24 +375,23 @@ def run_hashtag():
         load_to_bigquery(dataset, media_table, media_gcs_uri)
 
         # -----------------------------
-        # snapshotsテーブル用
+        # snapshotsテーブル用（JSON型カラムに合わせる）
         # -----------------------------
         snapshot_row = {
             "run_id": run_id,
             "hashtag_id": str(hashtag_id),
             "collected_at": collected_at_iso,
-
+        
             "ig_user_id": str(ig_user_id),
             "api_version": str(api_version),
-
+        
+            # JSON型カラム：dict/listをそのまま入れる（文字列化しない）
             "stage1_params": stage1_params,
             "stage2_params": stage2_params,
-
             "stage1_response": stage1_response,
             "stage2_response": stage2_response,
-
         }
-
+        
         snapshot_blob_name = f"instagram/hashtag_snapshots/{hashtag_id}/{run_id}.ndjson"
         upload_to_gcs(bucket, snapshot_blob_name, [snapshot_row])
         snapshot_gcs_uri = f"gs://{bucket}/{snapshot_blob_name}"
