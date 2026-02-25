@@ -199,18 +199,17 @@ def load_to_bigquery(dataset_id, table_id, gcs_uri):
     client = bigquery.Client()
     table_ref = f"{client.project}.{dataset_id}.{table_id}"
 
+    table = client.get_table(table_ref)
+
     job_config = bigquery.LoadJobConfig(
         source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-        autodetect=True,
+        autodetect=False,
+        schema=table.schema,
         write_disposition="WRITE_APPEND",
+        ignore_unknown_values=True,
     )
 
-    load_job = client.load_table_from_uri(
-        gcs_uri,
-        table_ref,
-        job_config=job_config,
-    )
-
+    load_job = client.load_table_from_uri(gcs_uri, table_ref, job_config=job_config)
     load_job.result()
 
 
