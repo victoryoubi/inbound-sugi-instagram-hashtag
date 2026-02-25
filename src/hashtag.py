@@ -11,10 +11,15 @@ from google.cloud import bigquery
 _TZ_NO_COLON = re.compile(r"([+-]\d{2})(\d{2})$")  # +0000 -> +00:00
 REDUCE_MSG = "Please reduce the amount of data you're asking for"
 
+
+def _utc_now_iso_z():
+    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+
 def _backoff_sleep(attempt: int, base: float = 1.0, cap: float = 60.0):
-    # 1,2,4,8... + jitter
     sec = min(cap, base * (2 ** attempt)) + random.random()
     time.sleep(sec)
+
 
 def _get_json_with_retry(url, params=None, timeout=(10, 120), max_attempts=6):
     """
@@ -36,7 +41,6 @@ def _get_json_with_retry(url, params=None, timeout=(10, 120), max_attempts=6):
         err_code = None
         is_transient = False
 
-        # 可能ならJSONでエラー詳細を読む（Graphはだいたいこの形）
         try:
             j = r.json()
             err = (j or {}).get("error") or {}
@@ -46,28 +50,28 @@ def _get_json_with_retry(url, params=None, timeout=(10, 120), max_attempts=6):
         except Exception:
             msg = txt
 
-        # ✅ リトライしたいケース
-        # - 429: rate limit
-        # - 5xx: transient
-        # - reduce message
-        # - 403 code=4 (Application request limit reached) かつ transient
         if (
             r.status_code in (429, 500, 502, 503, 504)
             or REDUCE_MSG in txt
             or (r.status_code == 403 and err_code == 4 and is_transient)
         ):
-            last_err = RuntimeError(f"Error {r.status_code} (code={err_code}, transient={is_transient}): {msg}")
-            _backoff_sleep(attempt, base=2.0, cap=120.0)  # ★少し強めに待つ
+            last_err = RuntimeError(
+                f"Error {r.status_code} (code={err_code}, transient={is_transient}): {msg}"
+            )
+            _backoff_sleep(attempt, base=2.0, cap=120.0)
             continue
 
-        # Hard failure
         raise RuntimeError(f"Error {r.status_code}: {txt}")
 
     raise RuntimeError(f"Retry exhausted: {last_err}")
 
+
 def _fetch_recent_media_light(hashtag_id, ig_user_id, access_token, api_version, per_page, max_items):
     """
-    Stage 1: lightweight recent_media (IDs only-ish)
+    Stage 1: lightweight recent_media (id,timestamp,media_type,permalink)
+    Returns:
+      base_rows: list[dict]
+      stage1_response: dict
     """
     url = f"https://graph.facebook.com/{api_version}/{hashtag_id}/recent_media"
 
@@ -79,26 +83,41 @@ def _fetch_recent_media_light(hashtag_id, ig_user_id, access_token, api_version,
     }
 
     all_rows = []
+    pages = []
+    page_count = 0
+
     while True:
         res = _get_json_with_retry(url, params=params, timeout=(10, 120), max_attempts=6)
+
+        page_count += 1
+        pages.append(res) 
+
         data = res.get("data", [])
         all_rows.extend(data)
 
         if len(all_rows) >= max_items:
-            return all_rows[:max_items]
+            all_rows = all_rows[:max_items]
+            break
 
         next_url = res.get("paging", {}).get("next")
         if not next_url:
-            return all_rows
+            break
 
-        # next contains token and params in URL already
         url = next_url
         params = None
+
+    stage1_response = {
+        "page_count": page_count,
+        "returned_count": len(all_rows),
+        "pages": pages,
+    }
+    return all_rows, stage1_response
+
 
 def _fetch_media_detail_batch(media_ids, access_token, api_version):
     """
     Stage 2 (batch): fetch full fields for multiple media_ids in one request using ?ids=
-    戻り値は { "<id>": {...}, "<id>": {...} } のdict
+    Returns dict: { "<id>": {...}, ... }
     """
     url = f"https://graph.facebook.com/{api_version}/"
     params = {
@@ -108,25 +127,42 @@ def _fetch_media_detail_batch(media_ids, access_token, api_version):
     }
     return _get_json_with_retry(url, params=params, timeout=(10, 120), max_attempts=8)
 
-def fetch_all_recent_media(hashtag_id, ig_user_id, access_token, api_version):
+
+def fetch_all_recent_media_with_snapshots(hashtag_id, ig_user_id, access_token, api_version):
     """
-    2段階取得（バッチ版）
-    Stage1: recent_mediaは軽く（id等のみ）
-    Stage2: ids= でまとめて詳細取得（API回数激減）
-    env:
-      LIMIT: recent_media の1ページ件数（推奨 10〜25）
-      MAX_ITEMS: 1ハッシュタグ最大取得件数（要望通り 500）
-      DETAIL_BATCH_SIZE: 詳細をまとめる件数（推奨 25〜50）
-      DETAIL_BATCH_SLEEP_SEC: バッチ間の待ち（推奨 0〜0.5）
+    2段階取得（バッチ版）+ snapshot用 raw response を返す
+    Returns:
+      detailed_rows: list[dict]   (mediaテーブル用の詳細行)
+      stage1_params: dict
+      stage2_params: dict
+      stage1_response: dict      (ページごとの生レスポンスを含む)
+      stage2_response: dict      (ids= の生レスポンスを全件マージした dict)
+      stage2_response_meta: dict (失敗バッチなど補助情報)
     """
     per_page = int(os.getenv("LIMIT", "10"))
     max_items = int(os.getenv("MAX_ITEMS", "500"))
-
-    batch_size = int(os.getenv("DETAIL_BATCH_SIZE", "50"))  # ★ここが肝
+    batch_size = int(os.getenv("DETAIL_BATCH_SIZE", "50"))
     batch_sleep = float(os.getenv("DETAIL_BATCH_SLEEP_SEC", "0.0"))
 
-    # Stage 1: light list
-    base_rows = _fetch_recent_media_light(
+    stage1_params = {
+        "endpoint": f"/{hashtag_id}/recent_media",
+        "user_id": ig_user_id,
+        "fields": "id,timestamp,media_type,permalink",
+        "limit": per_page,
+        "max_items": max_items,
+        # access_token は保存しない
+    }
+
+    stage2_params = {
+        "endpoint": "/",
+        "fields": "id,caption,timestamp,media_type,media_url,permalink,comments_count,like_count",
+        "detail_batch_size": batch_size,
+        "detail_batch_sleep_sec": batch_sleep,
+        # access_token は保存しない
+    }
+
+    # Stage 1
+    base_rows, stage1_response = _fetch_recent_media_light(
         hashtag_id=hashtag_id,
         ig_user_id=ig_user_id,
         access_token=access_token,
@@ -135,20 +171,30 @@ def fetch_all_recent_media(hashtag_id, ig_user_id, access_token, api_version):
         max_items=max_items,
     )
 
-    detailed = []
+    detailed_rows = []
+    stage2_response_merged = {}  # { "<id>": {...}, ... }
+    stage2_meta = {
+        "total_base_rows": len(base_rows),
+        "failed_batches": [],  # [{"range":[i,j], "ids":[...], "error":"..."}]
+    }
 
-    # Stage 2: batch detail
     for i in range(0, len(base_rows), batch_size):
         batch = base_rows[i:i + batch_size]
         ids = [x["id"] for x in batch]
 
         try:
             res = _fetch_media_detail_batch(ids, access_token, api_version)
+            if isinstance(res, dict):
+                stage2_response_merged.update(res)
         except Exception as e:
-            # バッチが丸ごと落ちたら、最低限を突っ込んで続行（運用優先）
-            print(f"warn: batch detail fetch failed ids[{i}:{i+batch_size}]: {e}")
+            stage2_meta["failed_batches"].append({
+                "range": [i, i + len(batch)],
+                "ids": ids,
+                "error": str(e),
+            })
+           
             for b in batch:
-                detailed.append({
+                detailed_rows.append({
                     "id": b.get("id"),
                     "caption": None,
                     "timestamp": b.get("timestamp"),
@@ -160,14 +206,13 @@ def fetch_all_recent_media(hashtag_id, ig_user_id, access_token, api_version):
                 })
             continue
 
-        # res は {id: {...}} 形式
+    
         for b in batch:
             mid = b["id"]
-            if isinstance(res, dict) and mid in res and isinstance(res[mid], dict):
-                detailed.append(res[mid])
+            if mid in stage2_response_merged and isinstance(stage2_response_merged[mid], dict):
+                detailed_rows.append(stage2_response_merged[mid])
             else:
-                # 返ってこなかったIDは最低限で埋める（NULL）
-                detailed.append({
+                detailed_rows.append({
                     "id": b.get("id"),
                     "caption": None,
                     "timestamp": b.get("timestamp"),
@@ -184,14 +229,23 @@ def fetch_all_recent_media(hashtag_id, ig_user_id, access_token, api_version):
         if (i // batch_size + 1) % 5 == 0:
             print(f"detail batch done: {min(i+batch_size, len(base_rows))}/{len(base_rows)}")
 
-    return detailed
+    # stage2_response は “全部丸ごと”
+    stage2_response = stage2_response_merged
+
+    return (
+        detailed_rows,
+        stage1_params,
+        stage2_params,
+        stage1_response,
+        stage2_response,
+        stage2_meta,
+    )
 
 
 def upload_to_gcs(bucket_name, blob_name, rows):
     client = storage.Client()
     bucket = client.bucket(bucket_name)
     blob = bucket.blob(blob_name)
-
     ndjson = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n"
     blob.upload_from_string(ndjson, content_type="application/json")
 
@@ -212,6 +266,7 @@ def load_to_bigquery(dataset_id, table_id, gcs_uri):
 
     load_job = client.load_table_from_uri(gcs_uri, table_ref, job_config=job_config)
     load_job.result()
+
 
 def _to_int_or_none(x):
     if x is None:
@@ -235,6 +290,7 @@ def _to_int_or_none(x):
     except Exception:
         return None
 
+
 def _to_ts_or_none(x):
     """
     Normalize various ISO8601-ish strings to RFC3339 that BigQuery accepts.
@@ -248,20 +304,16 @@ def _to_ts_or_none(x):
         if not s:
             return None
 
-        # Convert trailing +HHMM / -HHMM to +HH:MM / -HH:MM
         s = _TZ_NO_COLON.sub(r"\1:\2", s)
 
-        # If ends with 'Z' keep, else parse offset-aware string
         try:
             dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
         except ValueError:
             return None
 
-        # Convert to UTC and format with 'Z'
         dt_utc = dt.astimezone(timezone.utc).replace(microsecond=0)
         return dt_utc.isoformat().replace("+00:00", "Z")
 
-    # Unknown types -> None
     return None
 
 
@@ -272,43 +324,87 @@ def run_hashtag():
 
     bucket = os.environ["GCS_BUCKET"]
     dataset = os.environ["BQ_DATASET"]
-    table = os.environ["BQ_TABLE"]
+    media_table = os.environ["BQ_TABLE"]
+
+    snapshot_table = os.environ["BQ_SNAPSHOT_TABLE"]
 
     hashtag_ids = [x.strip() for x in os.environ["HASHTAG_IDS"].split(",") if x.strip()]
-
     sleep_sec = float(os.getenv("TAG_SLEEP_SEC", "10"))
 
     for i, hashtag_id in enumerate(hashtag_ids):
         print(f"===== Processing {hashtag_id} =====")
 
-        rows = fetch_all_recent_media(hashtag_id, ig_user_id, access_token, api_version)
+        # run_id は「1 hashtag 1 run」で一意になるように
+        run_id = f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{hashtag_id}"
+
+        collected_at_iso = _utc_now_iso_z() 
+        fetched_at_iso = collected_at_iso   
+
+        # 取得 + snapshot raw を受け取る
+        (
+            rows,
+            stage1_params,
+            stage2_params,
+            stage1_response,
+            stage2_response,
+            stage2_meta,
+        ) = fetch_all_recent_media_with_snapshots(hashtag_id, ig_user_id, access_token, api_version)
+
         print(f"Fetched {len(rows)} rows")
 
-        now_iso = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+        # -----------------------------
+        # mediaテーブル用
+        # -----------------------------
         hid_int = _to_int_or_none(hashtag_id)
-        
+
         enriched_rows = []
         for row in rows:
-            row["id"] = _to_int_or_none(row.get("id"))          # ★重要
-            row["hashtag_id"] = hid_int                         # ★重要
+            row["id"] = _to_int_or_none(row.get("id"))          
+            row["hashtag_id"] = hid_int
             row["comments_count"] = _to_int_or_none(row.get("comments_count"))
             row["like_count"] = _to_int_or_none(row.get("like_count"))
             row["timestamp"] = _to_ts_or_none(row.get("timestamp"))
-        
-            row["fetched_at"] = now_iso
-        
+            row["fetched_at"] = fetched_at_iso
             enriched_rows.append(row)
 
         now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        blob_name = f"instagram/hashtag/{hashtag_id}/{now}.ndjson"
 
-        upload_to_gcs(bucket, blob_name, enriched_rows)
-        gcs_uri = f"gs://{bucket}/{blob_name}"
-        load_to_bigquery(dataset, table, gcs_uri)
+        media_blob_name = f"instagram/hashtag/{hashtag_id}/{now}.ndjson"
+        upload_to_gcs(bucket, media_blob_name, enriched_rows)
+        media_gcs_uri = f"gs://{bucket}/{media_blob_name}"
+        load_to_bigquery(dataset, media_table, media_gcs_uri)
 
-        # ★追加：次のハッシュタグへ行く前に待つ（最後は待たない）
+        # -----------------------------
+        # snapshotsテーブル用
+        # -----------------------------
+        snapshot_row = {
+            "run_id": run_id,
+            "hashtag_id": str(hashtag_id),
+            "collected_at": collected_at_iso,
+
+            "ig_user_id": str(ig_user_id),
+            "api_version": str(api_version),
+
+            "stage1_params": stage1_params,
+            "stage2_params": stage2_params,
+
+            "stage1_response": stage1_response,
+            "stage2_response": stage2_response,
+
+        }
+
+        snapshot_blob_name = f"instagram/hashtag_snapshots/{hashtag_id}/{run_id}.ndjson"
+        upload_to_gcs(bucket, snapshot_blob_name, [snapshot_row])
+        snapshot_gcs_uri = f"gs://{bucket}/{snapshot_blob_name}"
+        load_to_bigquery(dataset, snapshot_table, snapshot_gcs_uri)
+
+        # 次ハッシュタグ前に待つ（最後は待たない）
         if i < len(hashtag_ids) - 1:
             print(f"Sleeping {sleep_sec}s before next hashtag...")
             time.sleep(sleep_sec)
 
     print("✅ All hashtags done")
+
+
+if __name__ == "__main__":
+    run_hashtag()
