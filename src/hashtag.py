@@ -212,6 +212,38 @@ def load_to_bigquery(dataset_id, table_id, gcs_uri):
     load_job = client.load_table_from_uri(gcs_uri, table_ref, job_config=job_config)
     load_job.result()
 
+def _to_int_or_none(x):
+    if x is None:
+        return None
+    if isinstance(x, bool):
+        return None
+    if isinstance(x, int):
+        return x
+    if isinstance(x, float):
+        return int(x)
+    if isinstance(x, str):
+        s = x.strip()
+        if s == "" or s.lower() in {"n/a", "null", "none"}:
+            return None
+        try:
+            return int(s)
+        except ValueError:
+            return None
+    try:
+        return int(x)
+    except Exception:
+        return None
+
+def _to_ts_or_none(x):
+    # BigQuery TIMESTAMPは "YYYY-MM-DDTHH:MM:SSZ" などを受けるので、
+    # ここでは最低限、空文字をNoneにする程度でOK
+    if x is None:
+        return None
+    if isinstance(x, str):
+        s = x.strip()
+        return None if s == "" else s
+    return str(x)
+
 
 def run_hashtag():
     api_version = os.getenv("FB_API_VERSION", "v24.0")
@@ -233,10 +265,18 @@ def run_hashtag():
         print(f"Fetched {len(rows)} rows")
 
         now_iso = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+        hid_int = _to_int_or_none(hashtag_id)
+        
         enriched_rows = []
         for row in rows:
+            row["id"] = _to_int_or_none(row.get("id"))          # ★重要
+            row["hashtag_id"] = hid_int                         # ★重要
+            row["comments_count"] = _to_int_or_none(row.get("comments_count"))
+            row["like_count"] = _to_int_or_none(row.get("like_count"))
+            row["timestamp"] = _to_ts_or_none(row.get("timestamp"))
+        
             row["fetched_at"] = now_iso
-            row["hashtag_id"] = hashtag_id
+        
             enriched_rows.append(row)
 
         now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
