@@ -3,11 +3,11 @@ import json
 import requests
 import random
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from google.cloud import storage
 from google.cloud import bigquery
 
-
+_TZ_NO_COLON = re.compile(r"([+-]\d{2})(\d{2})$")  # +0000 -> +00:00
 REDUCE_MSG = "Please reduce the amount of data you're asking for"
 
 def _backoff_sleep(attempt: int, base: float = 1.0, cap: float = 60.0):
@@ -235,14 +235,33 @@ def _to_int_or_none(x):
         return None
 
 def _to_ts_or_none(x):
-    # BigQuery TIMESTAMPは "YYYY-MM-DDTHH:MM:SSZ" などを受けるので、
-    # ここでは最低限、空文字をNoneにする程度でOK
+    """
+    Normalize various ISO8601-ish strings to RFC3339 that BigQuery accepts.
+    Returns 'YYYY-MM-DDTHH:MM:SSZ' (UTC) or None.
+    """
     if x is None:
         return None
+
     if isinstance(x, str):
         s = x.strip()
-        return None if s == "" else s
-    return str(x)
+        if not s:
+            return None
+
+        # Convert trailing +HHMM / -HHMM to +HH:MM / -HH:MM
+        s = _TZ_NO_COLON.sub(r"\1:\2", s)
+
+        # If ends with 'Z' keep, else parse offset-aware string
+        try:
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+        # Convert to UTC and format with 'Z'
+        dt_utc = dt.astimezone(timezone.utc).replace(microsecond=0)
+        return dt_utc.isoformat().replace("+00:00", "Z")
+
+    # Unknown types -> None
+    return None
 
 
 def run_hashtag():
