@@ -14,8 +14,8 @@ from google.cloud import bigquery
 T = TypeVar("T")
 
 PROJECT_ID = "inbound-core"
-WORKFLOW_NAME = "naver-article-product-matching-pipeline"
-SNAPSHOT_TABLE = "inbound-core.search.product_demand_serp_snapshots"
+WORKFLOW_NAME = "instagram-post-product-matching-pipeline"
+SNAPSHOT_TABLE = "inbound-core.instagram.instagram_hashtag_snapshots"
 JOB_RUNS_TABLE = "inbound-core.workflows.pipeline_job_runs"
 
 # ====== Default timeouts (tune as needed) ======
