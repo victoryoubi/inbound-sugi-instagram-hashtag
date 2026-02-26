@@ -5,11 +5,24 @@ import requests
 import random
 import time
 from datetime import datetime, timezone
+from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+
 from google.cloud import storage
 from google.cloud import bigquery
 
 _TZ_NO_COLON = re.compile(r"([+-]\d{2})(\d{2})$")  # +0000 -> +00:00
 REDUCE_MSG = "Please reduce the amount of data you're asking for"
+
+# token/secret 系はキーとして来ても、URL文字列内に入ってても除去する
+SENSITIVE_KEYS = {
+    "access_token",
+    "authorization",
+    "refresh_token",
+    "id_token",
+    "token",
+    "client_secret",
+    "appsecret_proof",
+}
 
 
 def _utc_now_iso_z():
@@ -19,6 +32,53 @@ def _utc_now_iso_z():
 def _backoff_sleep(attempt: int, base: float = 1.0, cap: float = 60.0):
     sec = min(cap, base * (2 ** attempt)) + random.random()
     time.sleep(sec)
+
+
+def _strip_token_from_url(s: str) -> str:
+    """
+    URL文字列に含まれる access_token 等をクエリから除去する
+    """
+    try:
+        parts = urlsplit(s)
+        # URLっぽくなければそのまま
+        if not parts.scheme or not parts.netloc:
+            return s
+
+        q = parse_qsl(parts.query, keep_blank_values=True)
+        q2 = [(k, v) for (k, v) in q if str(k).lower() not in SENSITIVE_KEYS]
+        new_query = urlencode(q2, doseq=True)
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
+    except Exception:
+        return s
+
+
+def _redact_sensitive(obj):
+    """
+    dict/list/str を再帰的に走査して
+    - token系キーを削除
+    - URL文字列に埋まった access_token 等を除去
+    """
+    if obj is None:
+        return None
+
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            if k is None:
+                continue
+            kl = str(k).lower()
+            if kl in SENSITIVE_KEYS:
+                continue
+            out[k] = _redact_sensitive(v)
+        return out
+
+    if isinstance(obj, list):
+        return [_redact_sensitive(x) for x in obj]
+
+    if isinstance(obj, str):
+        return _strip_token_from_url(obj)
+
+    return obj
 
 
 def _get_json_with_retry(url, params=None, timeout=(10, 120), max_attempts=6):
@@ -74,9 +134,10 @@ def _get_json_with_retry(url, params=None, timeout=(10, 120), max_attempts=6):
 def _fetch_recent_media_full(hashtag_id, ig_user_id, access_token, api_version, per_page, max_items):
     """
     Single-stage: /{hashtag_id}/recent_media with full fields (limit small + pagination)
+
     Returns:
       rows: list[dict]  (media table candidate rows)
-      stage1_response: dict (snapshot raw pages)
+      stage1_response: dict (snapshot raw pages: redacted)
     """
     url = f"https://graph.facebook.com/{api_version}/{hashtag_id}/recent_media"
     params = {
@@ -94,7 +155,9 @@ def _fetch_recent_media_full(hashtag_id, ig_user_id, access_token, api_version, 
         res = _get_json_with_retry(url, params=params, timeout=(10, 120), max_attempts=6)
 
         page_count += 1
-        pages.append(res)
+
+        # スナップショット用は秘匿情報を除去した上で保存
+        pages.append(_redact_sensitive(res))
 
         data = res.get("data", [])
         all_rows.extend(data)
@@ -110,10 +173,10 @@ def _fetch_recent_media_full(hashtag_id, ig_user_id, access_token, api_version, 
         url = next_url
         params = None
 
-    stage1_response = {
+    response = {
         "page_count": page_count,
         "returned_count": len(all_rows),
-        "pages": pages,
+        "pages": pages,  # ← redacted済みの生レスポンス（丸ごと）
     }
     return all_rows, stage1_response
 
@@ -121,19 +184,11 @@ def _fetch_recent_media_full(hashtag_id, ig_user_id, access_token, api_version, 
 def fetch_recent_media_full_with_snapshots(hashtag_id, ig_user_id, access_token, api_version):
     """
     1段階取得（recent_media一発 + pagination）+ snapshot用 raw response を返す（BQ schema互換）
-
-    Returns:
-      rows: list[dict]            (mediaテーブル用の行)
-      stage1_params: dict         (snapshots JSON列に入れる)
-      stage2_params: None         (廃止)
-      stage1_response: dict       (snapshots JSON列: pages を含む)
-      stage2_response: None       (廃止)
-      stage2_meta: None           (廃止)
     """
     per_page = int(os.getenv("LIMIT", "10"))
     max_items = int(os.getenv("MAX_ITEMS", "500"))
 
-    stage1_params = {
+    params = {
         "endpoint": f"/{hashtag_id}/recent_media",
         "user_id": str(ig_user_id),
         "fields": "id,caption,timestamp,media_type,media_url,permalink,comments_count,like_count",
@@ -142,7 +197,7 @@ def fetch_recent_media_full_with_snapshots(hashtag_id, ig_user_id, access_token,
         # access_token は保存しない
     }
 
-    rows, stage1_response = _fetch_recent_media_full(
+    rows, response = _fetch_recent_media_full(
         hashtag_id=hashtag_id,
         ig_user_id=ig_user_id,
         access_token=access_token,
@@ -151,7 +206,7 @@ def fetch_recent_media_full_with_snapshots(hashtag_id, ig_user_id, access_token,
         max_items=max_items,
     )
 
-    return rows, stage1_params, None, stage1_response, None, None
+    return rows, params, response
 
 
 def upload_to_gcs(bucket_name, blob_name, rows):
@@ -179,7 +234,7 @@ def load_to_bigquery(dataset_id, table_id, gcs_uri):
     load_job = client.load_table_from_uri(gcs_uri, table_ref, job_config=job_config)
     load_job.result()
 
-    # 重要: 行数減少やフィールド欠落の切り分け用
+    # 行欠損の切り分け用（重要）
     print(f"[BQ] loaded to {table_ref} from {gcs_uri}")
     print(f"[BQ] output_rows: {load_job.output_rows}")
     if load_job.errors:
@@ -245,7 +300,6 @@ def run_hashtag():
     bucket = os.environ["GCS_BUCKET"]
     dataset = os.environ["BQ_DATASET"]
     media_table = os.environ["BQ_TABLE"]
-
     snapshot_table = os.environ["BQ_SNAPSHOT_TABLE"]
 
     hashtag_ids = [x.strip() for x in os.environ["HASHTAG_IDS"].split(",") if x.strip()]
@@ -260,15 +314,9 @@ def run_hashtag():
         collected_at_iso = _utc_now_iso_z()
         fetched_at_iso = collected_at_iso
 
-        # 1段階取得 + snapshot raw を受け取る
-        (
-            rows,
-            stage1_params,
-            stage2_params,
-            stage1_response,
-            stage2_response,
-            stage2_meta,
-        ) = fetch_recent_media_full_with_snapshots(hashtag_id, ig_user_id, access_token, api_version)
+        rows, stage1_params, _, stage1_response, _, _ = fetch_recent_media_full_with_snapshots(
+            hashtag_id, ig_user_id, access_token, api_version
+        )
 
         print(f"Fetched {len(rows)} rows")
 
@@ -279,18 +327,17 @@ def run_hashtag():
 
         enriched_rows = []
         for row in rows:
-            # media row shape (keep only what you want + normalize types)
             out = dict(row) if isinstance(row, dict) else {}
 
             out["id"] = _to_int_or_none(out.get("id"))
             out["hashtag_id"] = hid_int
-
             out["comments_count"] = _to_int_or_none(out.get("comments_count"))
             out["like_count"] = _to_int_or_none(out.get("like_count"))
             out["timestamp"] = _to_ts_or_none(out.get("timestamp"))
-
             out["fetched_at"] = fetched_at_iso
-            enriched_rows.append(out)
+
+            # 念のため、media行にもURL内tokenが混ざらないように（通常は無いが保険）
+            enriched_rows.append(_redact_sensitive(out))
 
         now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
 
@@ -301,46 +348,33 @@ def run_hashtag():
 
         # -----------------------------
         # snapshotsテーブル用
-        #  - BQ列: stage1_params(JSON), stage2_params(JSON), stage1_response(JSON), stage2_response(JSON)
-        #  - stage/seq/meta/response 等の列は無いので JSON内に埋め込む
         # -----------------------------
-        snapshot_rows = []
+        snapshot_rows = [{
+            "run_id": run_id,
+            "hashtag_id": str(hashtag_id),
+            "collected_at": collected_at_iso,
+            "ig_user_id": str(ig_user_id),
+            "api_version": str(api_version),
 
-        pages = (stage1_response or {}).get("pages", [])
-        for page_idx, page_res in enumerate(pages):
-            snapshot_rows.append({
-                "run_id": run_id,
-                "hashtag_id": str(hashtag_id),
-                "collected_at": collected_at_iso,
-                "ig_user_id": str(ig_user_id),
-                "api_version": str(api_version),
+            "params": params,
 
-                "stage1_params": stage1_params,
-                "stage2_params": None,
-
-                "stage1_response": {
-                    "stage": "stage1",
-                    "seq": int(page_idx),
-                    "page": page_res,
-                    "summary": {
-                        "page_count": (stage1_response or {}).get("page_count"),
-                        "returned_count": (stage1_response or {}).get("returned_count"),
-                    },
-                },
-                "stage2_response": None,
-            })
+            "response": response,
+        }]
 
         snapshot_blob_name = f"instagram/hashtag_snapshots/{hashtag_id}/{run_id}.ndjson"
         upload_to_gcs(bucket, snapshot_blob_name, snapshot_rows)
         snapshot_gcs_uri = f"gs://{bucket}/{snapshot_blob_name}"
         load_to_bigquery(dataset, snapshot_table, snapshot_gcs_uri)
 
-        # 次ハッシュタグ前に待つ（最後は待たない）
         if i < len(hashtag_ids) - 1:
             print(f"Sleeping {sleep_sec}s before next hashtag...")
             time.sleep(sleep_sec)
 
     print("✅ All hashtags done")
+
+
+if __name__ == "__main__":
+    run_hashtag()
 
 
 if __name__ == "__main__":
