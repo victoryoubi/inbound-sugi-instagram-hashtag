@@ -10,7 +10,7 @@ env:
   AR_REPO: insta
   IMAGE_NAME: instagram-hashtag
   # 更新したいJob名をスペース区切りで列挙
-  JOBS: "instagram-hashtag instagram-refresh"
+  JOBS: "instagram-hashtag instagram-refresh instagram-extract"
 
 jobs:
   deploy:
