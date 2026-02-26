@@ -308,6 +308,10 @@ def load_to_bigquery(dataset_id, table_id, gcs_uri):
 
     load_job = client.load_table_from_uri(gcs_uri, table_ref, job_config=job_config)
     load_job.result()
+    
+    print("load output_rows:", load_job.output_rows)
+    print("load errors:", load_job.errors)
+    print("load error_result:", load_job.error_result)
 
 
 def _to_int_or_none(x):
