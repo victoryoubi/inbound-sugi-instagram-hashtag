@@ -5,7 +5,7 @@ on:
     branches: ["main"]
 
 env:
-  PROJECT_ID: inbound-sugi-app
+  PROJECT_ID: inbound-core
   REGION: asia-northeast1
   AR_REPO: insta
   IMAGE_NAME: instagram-hashtag
