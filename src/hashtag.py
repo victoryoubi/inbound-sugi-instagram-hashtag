@@ -178,7 +178,7 @@ def _fetch_recent_media_full(hashtag_id, ig_user_id, access_token, api_version, 
         "returned_count": len(all_rows),
         "pages": pages,  # ← redacted済みの生レスポンス（丸ごと）
     }
-    return all_rows, stage1_response
+    return all_rows, response
 
 
 def fetch_recent_media_full_with_snapshots(hashtag_id, ig_user_id, access_token, api_version):
@@ -314,7 +314,7 @@ def run_hashtag():
         collected_at_iso = _utc_now_iso_z()
         fetched_at_iso = collected_at_iso
 
-        rows, stage1_params, _, stage1_response, _, _ = fetch_recent_media_full_with_snapshots(
+        rows, params, response = fetch_recent_media_full_with_snapshots(
             hashtag_id, ig_user_id, access_token, api_version
         )
 
@@ -355,9 +355,7 @@ def run_hashtag():
             "collected_at": collected_at_iso,
             "ig_user_id": str(ig_user_id),
             "api_version": str(api_version),
-
             "params": params,
-
             "response": response,
         }]
 
@@ -371,10 +369,6 @@ def run_hashtag():
             time.sleep(sleep_sec)
 
     print("✅ All hashtags done")
-
-
-if __name__ == "__main__":
-    run_hashtag()
 
 
 if __name__ == "__main__":
