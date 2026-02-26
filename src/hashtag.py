@@ -190,6 +190,7 @@ def fetch_recent_media_full_with_snapshots(hashtag_id, ig_user_id, access_token,
 
     params = {
         "endpoint": f"/{hashtag_id}/recent_media",
+        "hashtag_id": _to_int_or_none(hashtag_id),
         "user_id": str(ig_user_id),
         "fields": "id,caption,timestamp,media_type,media_url,permalink,comments_count,like_count",
         "limit": per_page,
@@ -351,7 +352,7 @@ def run_hashtag():
         # -----------------------------
         snapshot_rows = [{
             "run_id": run_id,
-            "hashtag_id": str(hashtag_id),
+            "hashtag_id": _to_int_or_none(hashtag_id),
             "collected_at": collected_at_iso,
             "ig_user_id": str(ig_user_id),
             "api_version": str(api_version),
