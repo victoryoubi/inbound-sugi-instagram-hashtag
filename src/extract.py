@@ -133,7 +133,7 @@ def fetch_pending_rows(
     return bigquery_query_rows(bq, query, job_config=job_config, operation_name="fetch_pending_rows")
 
 
-def extract() -> None:
+def run_extract() -> None:
     input_table = env("INPUT_TABLE")
     output_table = env("OUTPUT_TABLE")
     pk_col = env("PRIMARY_KEY_COLUMN")   # 例: id
@@ -251,4 +251,4 @@ def extract() -> None:
 
 
 if __name__ == "__main__":
-    extract()
+    run_extract()
