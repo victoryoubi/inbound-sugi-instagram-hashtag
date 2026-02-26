@@ -425,49 +425,49 @@ def run_hashtag():
         pages = (stage1_response or {}).get("pages", [])
         for page_idx, page_res in enumerate(pages):
             snapshot_rows.append({
-                "run_id": run_id,
-                "hashtag_id": str(hashtag_id),
-                "collected_at": collected_at_iso,
-                "ig_user_id": str(ig_user_id),
-                "api_version": str(api_version),
-
-                "stage": "stage1",
-                "seq": int(page_idx),
-
-                "stage1_params": stage1_params,
-                "stage2_params": None,
-
-                "response": page_res,
-                "meta": {
-                    "page_count": stage1_response.get("page_count"),
-                    "returned_count": stage1_response.get("returned_count"),
-                },
-            })
+                    "run_id": run_id,
+                    "hashtag_id": str(hashtag_id),
+                    "collected_at": collected_at_iso,
+                    "ig_user_id": str(ig_user_id),
+                    "api_version": str(api_version),
+                
+                    "stage1_params": stage1_params,
+                    "stage2_params": None,
+                
+                    "stage1_response": {
+                        "seq": int(page_idx),
+                        "page": page_res,
+                        "meta": {
+                            "page_count": stage1_response.get("page_count"),
+                            "returned_count": stage1_response.get("returned_count"),
+                        },
+                    },
+                    "stage2_response": None,
+                })
 
         # stage2: バッチごとに1行
         batches = (stage2_response or {}).get("batches", [])
         for b in batches:
             snapshot_rows.append({
-                "run_id": run_id,
-                "hashtag_id": str(hashtag_id),
-                "collected_at": collected_at_iso,
-                "ig_user_id": str(ig_user_id),
-                "api_version": str(api_version),
-
-                "stage": "stage2",
-                "seq": int(b.get("batch_index", 0)),
-
-                "stage1_params": None,
-                "stage2_params": stage2_params,
-
-                "response": b.get("response"),
-                "meta": {
-                    "ok": b.get("ok"),
-                    "error": b.get("error"),
-                    "range": b.get("range"),
-                    "ids": b.get("ids"),
-                },
-            })
+                    "run_id": run_id,
+                    "hashtag_id": str(hashtag_id),
+                    "collected_at": collected_at_iso,
+                    "ig_user_id": str(ig_user_id),
+                    "api_version": str(api_version),
+                
+                    "stage1_params": None,
+                    "stage2_params": stage2_params,
+                
+                    "stage1_response": None,
+                    "stage2_response": {
+                        "seq": int(b.get("batch_index", 0)),
+                        "ok": b.get("ok"),
+                        "error": b.get("error"),
+                        "range": b.get("range"),
+                        "ids": b.get("ids"),
+                        "response": b.get("response"),
+                    },
+                })
 
         snapshot_blob_name = f"instagram/hashtag_snapshots/{hashtag_id}/{run_id}.ndjson"
         upload_to_gcs(bucket, snapshot_blob_name, snapshot_rows)
