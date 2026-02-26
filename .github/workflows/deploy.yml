@@ -44,11 +44,11 @@ jobs:
         run: |
           docker push $REGION-docker.pkg.dev/$PROJECT_ID/$AR_REPO/$IMAGE_NAME:latest
       
-      #- name: Update Cloud Run Jobs image
-      # run: |
-      #  for JOB in $JOBS; do
-      #   echo "Updating job: $JOB"
-      #  gcloud run jobs update "$JOB" \
-      #   --image $REGION-docker.pkg.dev/$PROJECT_ID/$AR_REPO/$IMAGE_NAME:latest \
-      #  --region $REGION
-      #    done
+      - name: Update Cloud Run Jobs image
+        run: |
+          for JOB in $JOBS; do
+           echo "Updating job: $JOB"
+           gcloud run jobs update "$JOB" \
+            --image $REGION-docker.pkg.dev/$PROJECT_ID/$AR_REPO/$IMAGE_NAME:latest \
+            --region $REGION
+             done
