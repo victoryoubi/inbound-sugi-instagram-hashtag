@@ -24,7 +24,7 @@ from common.common import (
 STEP_NAME = "post-product-name-extractor"  
 
 MODEL_NAME = "gemini-2.5-pro"
-TEXT_LIMIT_CHARS = 12_000
+TEXT_LIMIT_CHARS = 3_000
 
 BATCH_LIMIT_ROWS = 50
 MAX_TOTAL_ROWS = 1000
