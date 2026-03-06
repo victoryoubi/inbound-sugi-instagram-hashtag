@@ -211,11 +211,20 @@ def fetch_recent_media_full_with_snapshots(hashtag_id, ig_user_id, access_token,
 
 
 def upload_to_gcs(bucket_name, blob_name, rows):
+    if not rows:
+        # 0件ならアップロードしない（空行NDJSON事故を防ぐ）
+        return False
+
     client = storage.Client()
     bucket = client.bucket(bucket_name)
     blob = bucket.blob(blob_name)
-    ndjson = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n"
-    blob.upload_from_string(ndjson, content_type="application/json")
+
+    ndjson = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
+    # 末尾改行はあってもなくてもOKだが、付けるなら rows>0 の時だけ
+    ndjson += "\n"
+
+    blob.upload_from_string(ndjson, content_type="application/x-ndjson")
+    return True
 
 
 def load_to_bigquery(dataset_id, table_id, gcs_uri):
@@ -343,9 +352,13 @@ def run_hashtag():
         now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
 
         media_blob_name = f"instagram/hashtag/{hashtag_id}/{now}.ndjson"
-        upload_to_gcs(bucket, media_blob_name, enriched_rows)
-        media_gcs_uri = f"gs://{bucket}/{media_blob_name}"
-        load_to_bigquery(dataset, media_table, media_gcs_uri)
+        uploaded = upload_to_gcs(bucket, media_blob_name, enriched_rows)
+        
+        if uploaded:
+            media_gcs_uri = f"gs://{bucket}/{media_blob_name}"
+            load_to_bigquery(dataset, media_table, media_gcs_uri)
+        else:
+            print("[SKIP] media rows=0 -> skip upload/load")
 
         # -----------------------------
         # snapshotsテーブル用
