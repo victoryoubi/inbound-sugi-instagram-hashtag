@@ -374,9 +374,10 @@ def run_hashtag():
         }]
 
         snapshot_blob_name = f"instagram/hashtag_snapshots/{hashtag_id}/{run_id}.ndjson"
-        upload_to_gcs(bucket, snapshot_blob_name, snapshot_rows)
-        snapshot_gcs_uri = f"gs://{bucket}/{snapshot_blob_name}"
-        load_to_bigquery(dataset, snapshot_table, snapshot_gcs_uri)
+        uploaded = upload_to_gcs(bucket, snapshot_blob_name, snapshot_rows)
+        if uploaded:
+            snapshot_gcs_uri = f"gs://{bucket}/{snapshot_blob_name}"
+            load_to_bigquery(dataset, snapshot_table, snapshot_gcs_uri)
 
         if i < len(hashtag_ids) - 1:
             print(f"Sleeping {sleep_sec}s before next hashtag...")
