@@ -315,6 +315,8 @@ def run_hashtag():
     hashtag_ids = [x.strip() for x in os.environ["HASHTAG_IDS"].split(",") if x.strip()]
     sleep_sec = float(os.getenv("TAG_SLEEP_SEC", "10"))
 
+    skipped = []
+
     for i, hashtag_id in enumerate(hashtag_ids):
         print(f"===== Processing {hashtag_id} =====")
 
@@ -324,9 +326,16 @@ def run_hashtag():
         collected_at_iso = _utc_now_iso_z()
         fetched_at_iso = collected_at_iso
 
-        rows, params, response = fetch_recent_media_full_with_snapshots(
-            hashtag_id, ig_user_id, access_token, api_version
-        )
+        try:
+            rows, params, response = fetch_recent_media_full_with_snapshots(
+                hashtag_id, ig_user_id, access_token, api_version
+            )
+        except Exception as e:
+            print(f"[SKIP] {hashtag_id} error: {e}")
+            skipped.append(hashtag_id)
+            if i < len(hashtag_ids) - 1:
+                time.sleep(sleep_sec)
+            continue
 
         print(f"Fetched {len(rows)} rows")
 
@@ -383,7 +392,9 @@ def run_hashtag():
             print(f"Sleeping {sleep_sec}s before next hashtag...")
             time.sleep(sleep_sec)
 
-    print("✅ All hashtags done")
+    if skipped:
+        print(f"[WARN] Skipped {len(skipped)} hashtags due to errors: {skipped}")
+    print("All hashtags done")
 
 
 if __name__ == "__main__":
