@@ -115,9 +115,13 @@ def _get_json_with_retry(url, params=None, timeout=(10, 120), max_attempts=6):
         except Exception:
             msg = txt
 
+        if REDUCE_MSG in txt:
+            raise RuntimeError(
+                f"Error {r.status_code} (code={err_code}): {msg}"
+            )
+
         if (
             r.status_code in (429, 500, 502, 503, 504)
-            or REDUCE_MSG in txt
             or (r.status_code == 403 and err_code == 4 and is_transient)
         ):
             last_err = RuntimeError(
@@ -186,7 +190,7 @@ def fetch_recent_media_full_with_snapshots(hashtag_id, ig_user_id, access_token,
     1段階取得（recent_media一発 + pagination）+ snapshot用 raw response を返す（BQ schema互換）
     """
     per_page = int(os.getenv("LIMIT", "10"))
-    max_items = int(os.getenv("MAX_ITEMS", "500"))
+    max_items = int(os.getenv("MAX_ITEMS", "50"))
 
     params = {
         "endpoint": f"/{hashtag_id}/recent_media",
